@@ -79,7 +79,7 @@ def get_response(user_query):
 
         # C. Generate Answer
         context_block = "\n---\n".join(retrieved_content)
-        # We limit context to 1000 chars to fit in small models
+        # We limit context to 1500 chars to fit in small models
         prompt = f"Context information:\n{context_block[:1500]}\n\nQuestion: {user_query}\n\nAnswer:"
         
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
@@ -106,7 +106,8 @@ def get_response(user_query):
         return f"Error during generation: {str(e)}", ""
 
 # --- 3. INTERFACE ---
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+# REMOVED THE THEME ARGUMENT TO FIX THE ERROR
+with gr.Blocks() as demo:
     gr.Markdown("# 🏥 Medical Knowledge Bot")
     gr.Markdown(f"RAG System searching across **{len(documents)}** dataset files.")
     
