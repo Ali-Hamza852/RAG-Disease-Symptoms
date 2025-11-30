@@ -3,8 +3,8 @@ import faiss
 import json
 import torch
 import os
+import re
 from sentence_transformers import SentenceTransformer
-# We use AutoModelForSeq2SeqLM because T5 is a Sequence-to-Sequence model (better for Q&A)
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 # --- 1. SETUP ---
@@ -41,28 +41,32 @@ except Exception as e:
     print(f"❌ CRITICAL ERROR loading files: {e}")
 
 # Load LLM (Generative Model)
-# We switch to FLAN-T5-BASE which is much better at following instructions than distilgpt2
-print("🤖 Loading Instruction Model (Flan-T5)...")
-model_name = "google/flan-t5-base" 
+# We use FLAN-T5-LARGE. It is smarter than 'base' and fits in the free tier memory.
+print("🤖 Loading Instruction Model (Flan-T5-Large)...")
+model_name = "google/flan-t5-large" 
 
 try:
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # Seq2SeqLM is required for T5 models
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
 except Exception as e:
     print(f"❌ Error loading model: {e}")
 
 # --- 2. LOGIC ---
+def clean_text(text):
+    """Helper to remove excessive JSON brackets for cleaner reading"""
+    # Remove curly braces and quotes to make it look like normal text
+    text = text.replace('"', '').replace('{', '').replace('}', '').replace('[', '').replace(']', '')
+    # Remove multiple spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def get_response(user_query):
     if index is None or not documents:
         return "Error: System not ready. Please check if files were uploaded correctly.", ""
 
     try:
         # A. Search (Retrieval)
-        # Normalize query because we used normalize_embeddings=True in Kaggle
         query_vector = embedder.encode([user_query], convert_to_numpy=True, normalize_embeddings=True)
-        
-        # Find closest 3 matches
         distances, indices = index.search(query_vector, 3)
         
         # B. Retrieve Text
@@ -71,32 +75,38 @@ def get_response(user_query):
         
         for idx in indices[0]:
             if 0 <= idx < len(documents):
-                # Clean up text to save tokens
-                text = documents[idx][:1000] # Limit chunk size
-                retrieved_content.append(text)
+                raw_text = documents[idx]
+                # Clean the JSON structure so the LLM doesn't get confused
+                cleaned = clean_text(raw_text)
+                retrieved_content.append(cleaned)
                 retrieved_names.append(sources[idx])
 
         # C. Generate Answer (Generation)
-        # T5 likes simple instructions.
-        context_block = "\n".join(retrieved_content)
+        context_block = "\n -- \n".join(retrieved_content)
         
-        # This prompt is specific for T5/Flan models
-        prompt = f"Answer the question based on the context below.\n\nContext:\n{context_block}\n\nQuestion: {user_query}"
+        # Strict Prompt for T5
+        prompt = (
+            f"Read the medical context below and answer the question truthfully.\n\n"
+            f"Context:\n{context_block[:2000]}\n\n"
+            f"Question: {user_query}\n\n"
+            f"Answer:"
+        )
         
         inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
         
         with torch.no_grad():
             outputs = model.generate(
                 **inputs, 
-                max_new_tokens=200,   # Allow longer answers
-                do_sample=True,       # Add a little creativity
-                temperature=0.6,      # Keep it factual
+                max_new_tokens=200,
+                do_sample=True,
+                temperature=0.5,     # Low temperature = more factual
+                repetition_penalty=1.2, # <--- THIS FIXES THE LOOPING BUG
                 top_p=0.9
             )
         
         final_answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Format sources for display
+        # Format sources
         source_str = "\n".join([f"📄 {name}" for name in set(retrieved_names)])
         
         return final_answer, source_str
@@ -107,11 +117,11 @@ def get_response(user_query):
 # --- 3. INTERFACE ---
 with gr.Blocks() as demo:
     gr.Markdown("# 🏥 Medical Knowledge Bot (RAG)")
-    gr.Markdown(f"Searching across **{len(documents)}** medical files using **Google Flan-T5**.")
+    gr.Markdown(f"Searching across **{len(documents)}** medical files.")
     
     with gr.Row():
         with gr.Column(scale=4):
-            inp = gr.Textbox(label="Ask a Question", placeholder="e.g., What are the symptoms of heart failure?", lines=2)
+            inp = gr.Textbox(label="Ask a Question", placeholder="e.g., What are the symptoms of Asthma?", lines=2)
             btn = gr.Button("Get Answer", variant="primary")
         
     with gr.Row():
